@@ -1,0 +1,189 @@
+"""
+Postgres-backed drop-in replacement for storage.py's JSON-file store, used
+only in production (Render) where the local filesystem doesn't persist
+across restarts. Same public function signatures as storage.py, so app.py
+just imports whichever one applies - see the top of app.py.
+
+Activated only when the DATABASE_URL environment variable is set (e.g. a
+free Neon Postgres connection string). Local development is untouched:
+without DATABASE_URL, app.py keeps using the original storage.py.
+"""
+
+import os
+import json
+from collections import defaultdict
+from contextlib import contextmanager
+
+import psycopg2
+
+DATABASE_URL = os.environ["DATABASE_URL"]
+
+KEY_FIELDS = {
+    "bills": ("branch", "bill", "date"),
+    "sales": ("branch", "date", "category", "item"),
+    "discounts": ("branch", "bill"),
+    "cancellations": ("branch", "bill", "date", "item"),
+}
+
+DEFAULT_META = {
+    "dataStart": None, "dataEnd": None, "lastRefreshed": None,
+    "reasons": ["Guest Cancellation", "Change Of Item", "Not Specified", "Other"],
+    "discountReasons": [], "serviceTypes": ["Dine-In", "Home Delivery", "Takeaway", "Banquets & Catering"],
+}
+
+
+@contextmanager
+def _conn():
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _ensure_schema():
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS meta (id INT PRIMARY KEY DEFAULT 1, data JSONB NOT NULL);")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rows (
+                dataset TEXT NOT NULL,
+                month TEXT NOT NULL,
+                row_key TEXT NOT NULL,
+                data JSONB NOT NULL,
+                PRIMARY KEY (dataset, row_key)
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS rows_dataset_month_idx ON rows (dataset, month);")
+        cur.execute("CREATE TABLE IF NOT EXISTS upload_history (id SERIAL PRIMARY KEY, entry JSONB NOT NULL);")
+
+
+_ensure_schema()
+
+
+def _row_key(dataset, row):
+    return "|".join(str(row.get(f)) for f in KEY_FIELDS[dataset])
+
+
+def _month_key(date_str):
+    return date_str[:7]
+
+
+def read_meta():
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT data FROM meta WHERE id = 1;")
+        r = cur.fetchone()
+    meta = dict(DEFAULT_META)
+    if r is not None:
+        meta.update(r[0])
+    return meta
+
+
+def write_meta(meta):
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO meta (id, data) VALUES (1, %s) "
+            "ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data;",
+            (json.dumps(meta),),
+        )
+
+
+def read_range(dataset, from_month=None, to_month=None):
+    query = "SELECT data FROM rows WHERE dataset = %s"
+    params = [dataset]
+    if from_month:
+        query += " AND month >= %s"
+        params.append(from_month)
+    if to_month:
+        query += " AND month <= %s"
+        params.append(to_month)
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        return [r[0] for r in cur.fetchall()]
+
+
+def replace_months(dataset, rows):
+    """See storage.py's replace_months docstring - same replace-the-whole-
+    month semantics, just against Postgres instead of a JSON file."""
+    by_month = defaultdict(list)
+    for row in rows:
+        by_month[_month_key(row["date"])].append(row)
+
+    result = {}
+    with _conn() as conn, conn.cursor() as cur:
+        for month, new_rows in by_month.items():
+            cur.execute("DELETE FROM rows WHERE dataset = %s AND month = %s;", (dataset, month))
+            deduped = {}
+            for row in new_rows:
+                deduped[_row_key(dataset, row)] = row
+            for key, row in deduped.items():
+                cur.execute(
+                    "INSERT INTO rows (dataset, month, row_key, data) VALUES (%s, %s, %s, %s);",
+                    (dataset, month, key, json.dumps(row)),
+                )
+            result[month] = {"added": len(deduped), "updated": 0}
+    return result
+
+
+def upsert_rows(dataset, rows):
+    by_month = defaultdict(list)
+    for row in rows:
+        by_month[_month_key(row["date"])].append(row)
+
+    result = {}
+    with _conn() as conn, conn.cursor() as cur:
+        for month, new_rows in by_month.items():
+            added = updated = 0
+            for row in new_rows:
+                key = _row_key(dataset, row)
+                cur.execute("SELECT 1 FROM rows WHERE dataset = %s AND row_key = %s;", (dataset, key))
+                exists = cur.fetchone() is not None
+                cur.execute(
+                    "INSERT INTO rows (dataset, month, row_key, data) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (dataset, row_key) DO UPDATE SET data = EXCLUDED.data, month = EXCLUDED.month;",
+                    (dataset, month, key, json.dumps(row)),
+                )
+                if exists:
+                    updated += 1
+                else:
+                    added += 1
+            result[month] = {"added": added, "updated": updated}
+    return result
+
+
+def delete_row(dataset, key_row):
+    key = _row_key(dataset, key_row)
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM rows WHERE dataset = %s AND row_key = %s;", (dataset, key))
+        return cur.rowcount > 0
+
+
+def recompute_meta_dates():
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT MIN(data->>'date'), MAX(data->>'date') FROM rows WHERE dataset = 'bills';")
+        row_min, row_max = cur.fetchone()
+    meta = read_meta()
+    meta["dataStart"] = row_min
+    meta["dataEnd"] = row_max
+    write_meta(meta)
+    return meta
+
+
+def read_upload_history():
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT entry FROM upload_history ORDER BY id ASC;")
+        return [r[0] for r in cur.fetchall()]
+
+
+def append_upload_history(entry):
+    """Keeps only the most recent 500, same as storage.py."""
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO upload_history (entry) VALUES (%s);", (json.dumps(entry),))
+        cur.execute(
+            "DELETE FROM upload_history WHERE id NOT IN "
+            "(SELECT id FROM upload_history ORDER BY id DESC LIMIT 500);"
+        )
+    return read_upload_history()

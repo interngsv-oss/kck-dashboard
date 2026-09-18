@@ -1,0 +1,286 @@
+"""
+KCK Sales Dashboard backend.
+
+Run with:
+    uvicorn app:app --host 0.0.0.0 --port 8000
+
+Endpoints:
+    GET  /api/meta
+    GET  /api/{dataset}?branch=&from=&to=      dataset: bills | sales | discounts | cancellations
+    POST /api/{dataset}                         body: one row (dict) -> create (409 if key exists)
+    PUT  /api/{dataset}                         body: one row (dict) -> update (404 if key missing)
+    DELETE /api/{dataset}                       body: {key fields only} -> delete (404 if missing)
+    POST /api/upload                            multipart upload of a whole "Posist Report" folder
+                                                 (e.g. from a <input webkitdirectory> picker) -
+                                                 -> parses it and upserts bills/sales/discounts
+    GET  /                                       the dashboard itself (kck_sales_dashboard_V11.html)
+"""
+
+import os
+import shutil
+import tempfile
+import zipfile
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+
+import parsers
+
+# storage.py's JSON-file store doesn't survive a redeploy/restart on a host
+# with no persistent disk (e.g. Render's free tier) - when DATABASE_URL is
+# set (production), use the Postgres-backed storage_db.py instead, which has
+# the exact same function signatures. Local development is untouched: with
+# no DATABASE_URL, this keeps using the original file-based storage.py.
+if os.environ.get("DATABASE_URL"):
+    import storage_db as storage
+else:
+    import storage
+
+# A copy of the dashboard HTML lives right next to this file so it deploys
+# as part of this repo (the original also still lives one level up from
+# kck_dashboard_pipeline/, for local editing convenience) - prefer the local
+# copy when both exist, since that's the one that actually ships.
+_LOCAL_HTML = os.path.join(os.path.dirname(__file__), "kck_sales_dashboard_V11.html")
+_DEV_HTML = os.path.join(os.path.dirname(__file__), "..", "..", "kck_sales_dashboard_V11.html")
+DASHBOARD_HTML_PATH = _LOCAL_HTML if os.path.exists(_LOCAL_HTML) else _DEV_HTML
+
+app = FastAPI(title="KCK Sales Dashboard API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+EDITABLE_DATASETS = ("bills", "sales", "discounts", "cancellations")
+
+
+def _require_dataset(dataset: str):
+    if dataset not in EDITABLE_DATASETS:
+        raise HTTPException(400, f"Unknown dataset '{dataset}'. Must be one of {EDITABLE_DATASETS}.")
+
+
+def _require_key_fields(dataset: str, row: Dict[str, Any]):
+    missing = [f for f in storage.KEY_FIELDS[dataset] if not row.get(f)]
+    if missing:
+        raise HTTPException(400, f"Missing required field(s) for '{dataset}': {missing}")
+
+
+@app.get("/")
+def serve_dashboard():
+    return FileResponse(DASHBOARD_HTML_PATH)
+
+
+@app.get("/api/meta")
+def get_meta():
+    return storage.read_meta()
+
+
+@app.get("/api/upload-history")
+def get_upload_history():
+    """Most-recent-first log of every /api/upload call: when it happened,
+    which files were sent, and how many rows landed in each month/dataset.
+    NOTE: like /api/upload below, this must stay registered before
+    GET /api/{dataset} - Starlette matches routes in registration order, and
+    "/api/upload-history" would otherwise match "/api/{dataset}" first (with
+    dataset="upload-history") and 400 as an unknown dataset."""
+    return list(reversed(storage.read_upload_history()))
+
+
+@app.get("/api/{dataset}")
+def list_rows(dataset: str, branch: Optional[str] = None,
+              from_: Optional[str] = None, to: Optional[str] = None):
+    _require_dataset(dataset)
+    rows = storage.read_range(dataset, from_month=from_[:7] if from_ else None,
+                               to_month=to[:7] if to else None)
+    if from_:
+        rows = [r for r in rows if r["date"] >= from_]
+    if to:
+        rows = [r for r in rows if r["date"] <= to]
+    if branch:
+        rows = [r for r in rows if r.get("branch") == branch]
+    return rows
+
+
+def _safe_relpath(filename: str) -> str:
+    """A browser folder-picker sends each file's name as its path relative to
+    the selected folder (e.g. 'Posist Report/Payment Report/Bangalore.xlsx').
+    Strip any '.'/'..'/empty segments so a crafted filename can't write outside
+    the temp extraction directory."""
+    parts = [p for p in filename.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    if not parts:
+        raise HTTPException(400, f"Invalid file name: {filename!r}")
+    return os.path.join(*parts)
+
+
+IGNORED_DIR_PREFIXES = ("__MACOSX", ".")
+
+
+def _find_posist_root(extract_dir, max_depth=4):
+    """A folder picker's selected folder (or an uploaded zip of it) is usually
+    named something like 'Posist Report' and wraps the report subfolders one
+    level down, sometimes more when a zip re-wraps it or adds junk folders
+    (e.g. macOS's '__MACOSX') - search down a few levels for the first folder
+    that actually contains 'Payment Report', ignoring junk folders."""
+    def search(d, depth):
+        if os.path.isdir(os.path.join(d, "Payment Report")):
+            return d
+        if depth <= 0:
+            return None
+        try:
+            subdirs = [e for e in os.listdir(d)
+                       if os.path.isdir(os.path.join(d, e)) and not e.startswith(IGNORED_DIR_PREFIXES)]
+        except FileNotFoundError:
+            return None
+        for sub in subdirs:
+            found = search(os.path.join(d, sub), depth - 1)
+            if found:
+                return found
+        return None
+
+    root = search(extract_dir, max_depth)
+    if root is None:
+        raise HTTPException(400, "Could not find a 'Payment Report' folder in what was uploaded.")
+    return root
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, dest_dir: str):
+    """Extract every entry of an uploaded zip into dest_dir, rejecting any
+    path that would escape it (zip-slip) the same way _safe_relpath does for
+    individually-uploaded files."""
+    for member in zf.infolist():
+        parts = [p for p in member.filename.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+        if not parts:
+            continue
+        target = os.path.join(dest_dir, *parts)
+        if member.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zf.open(member) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
+@app.post("/api/upload")
+async def upload_export(files: List[UploadFile] = File(...)):
+    """Accepts every file of a selected 'Posist Report' folder (each file's
+    name carries its path within that folder) and upserts its bills/sales/
+    discounts into the store.
+
+    NOTE: this must stay registered before POST /api/{dataset} below - Starlette
+    matches routes in registration order, and "/api/upload" would otherwise
+    match the "/api/{dataset}" pattern first (with dataset="upload") and get
+    routed into create_row() instead, which expects a JSON body, not a
+    multipart upload."""
+    if not files:
+        raise HTTPException(400, "No files received.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        extract_dir = os.path.join(tmp, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        for f in files:
+            filename = f.filename or ""
+            if filename.lower().endswith(".zip"):
+                zip_path = os.path.join(tmp, "_upload_" + _safe_relpath(filename).replace(os.sep, "_"))
+                with open(zip_path, "wb") as out:
+                    shutil.copyfileobj(f.file, out)
+                try:
+                    with zipfile.ZipFile(zip_path) as zf:
+                        _safe_extract_zip(zf, extract_dir)
+                except zipfile.BadZipFile:
+                    raise HTTPException(400, f"'{filename}' is not a valid zip file.")
+            else:
+                dest = os.path.join(extract_dir, _safe_relpath(filename))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(f.file, out)
+
+        posist_root = _find_posist_root(extract_dir)
+        try:
+            bills, sales, discounts = parsers.parse_posist_export(posist_root)
+        except FileNotFoundError as e:
+            raise HTTPException(400, str(e))
+
+    # replace_months (not upsert_rows) so re-uploading a month's report
+    # cleanly supersedes whatever was previously stored for that month,
+    # instead of merging with stale rows the new report no longer contains.
+    # Months not present in this upload are left untouched.
+    bills_result = storage.replace_months("bills", bills)
+    sales_result = storage.replace_months("sales", sales)
+    discounts_result = storage.replace_months("discounts", discounts)
+
+    discount_reasons = sorted({d["reason"] for d in discounts}) if discounts else None
+    meta = storage.read_meta()
+    if discount_reasons:
+        meta["discountReasons"] = sorted(set(meta.get("discountReasons", [])) | set(discount_reasons))
+    meta["lastRefreshed"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    # "Data Available" tracks exactly what THIS upload's own rows span (e.g. if
+    # the report only has rows for 1-25 June, this shows "1 Jun to 25 Jun") -
+    # not the full history still sitting in storage for other months, so it
+    # always reflects what was just uploaded rather than everything ever kept.
+    if bills:
+        upload_dates = [b["date"] for b in bills]
+        meta["dataStart"] = min(upload_dates)
+        meta["dataEnd"] = max(upload_dates)
+    storage.write_meta(meta)
+
+    months_touched = sorted(set(bills_result) | set(sales_result) | set(discounts_result))
+    storage.append_upload_history({
+        "timestamp": meta["lastRefreshed"],
+        "files": [f.filename for f in files if f.filename],
+        "months": months_touched,
+        "bills": bills_result,
+        "sales": sales_result,
+        "discounts": discounts_result,
+    })
+
+    return {
+        "bills": bills_result,
+        "sales": sales_result,
+        "discounts": discounts_result,
+    }
+
+
+@app.post("/api/{dataset}")
+def create_row(dataset: str, row: Dict[str, Any]):
+    _require_dataset(dataset)
+    _require_key_fields(dataset, row)
+    existing = storage.read_range(dataset)
+    key = tuple(row.get(f) for f in storage.KEY_FIELDS[dataset])
+    if any(tuple(r.get(f) for f in storage.KEY_FIELDS[dataset]) == key for r in existing):
+        raise HTTPException(409, "A row with this key already exists - use PUT to update it.")
+    storage.upsert_rows(dataset, [row])
+    if dataset == "bills":
+        storage.recompute_meta_dates()
+    return row
+
+
+@app.put("/api/{dataset}")
+def update_row(dataset: str, row: Dict[str, Any]):
+    _require_dataset(dataset)
+    _require_key_fields(dataset, row)
+    existing = storage.read_range(dataset)
+    key = tuple(row.get(f) for f in storage.KEY_FIELDS[dataset])
+    if not any(tuple(r.get(f) for f in storage.KEY_FIELDS[dataset]) == key for r in existing):
+        raise HTTPException(404, "No row with this key exists - use POST to create it.")
+    storage.upsert_rows(dataset, [row])
+    if dataset == "bills":
+        storage.recompute_meta_dates()
+    return row
+
+
+@app.delete("/api/{dataset}")
+def delete_row(dataset: str, key: Dict[str, Any]):
+    _require_dataset(dataset)
+    _require_key_fields(dataset, key)
+    if not storage.delete_row(dataset, key):
+        raise HTTPException(404, "No row with this key exists.")
+    if dataset == "bills":
+        storage.recompute_meta_dates()
+    return {"deleted": True}
+
+
