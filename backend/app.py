@@ -72,7 +72,10 @@ def _require_key_fields(dataset: str, row: Dict[str, Any]):
 
 @app.get("/")
 def serve_dashboard():
-    return FileResponse(DASHBOARD_HTML_PATH)
+    # No-cache so every deploy is visible immediately - without this, browsers
+    # can keep showing a stale cached copy of the page after we ship a fix,
+    # which looks exactly like the fix never went live.
+    return FileResponse(DASHBOARD_HTML_PATH, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/api/meta")
