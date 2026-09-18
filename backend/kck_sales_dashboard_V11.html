@@ -2548,7 +2548,7 @@ async function refreshUploadHistory(){
       historyList.innerHTML = `<p class="input-status">No uploads yet.</p>`;
       return;
     }
-    const rowsFor = (r) => Object.entries(r).map(([m, c]) => `${m}: ${num(c.added)}`).join(", ") || "—";
+    const rowsFor = (r) => Object.entries(r || {}).map(([m, c]) => `${m}: ${num(c.added)}`).join(", ") || "—";
     const th = label => `<th><div class="th-in"><span class="th-label">${esc(label)}</span></div></th>`;
     const rowsHtml = entries.map((e, i) => `
       <tr>
