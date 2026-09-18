@@ -2759,7 +2759,16 @@ function showGate(){
   authGate.style.display = "flex";
   appRoot.style.display = "none";
 }
-if (sessionStorage.getItem("kckAuthed") === "1") startApp();
+// Admin sessions stay logged in across a refresh (convenience while actively
+// managing data); viewer sessions do not - they must sign in again every
+// time the page loads, so a shared/public viewer login doesn't sit
+// permanently authenticated in someone's browser.
+if (sessionStorage.getItem("kckAuthed") === "1" && sessionStorage.getItem("kckRole") !== "viewer"){
+  startApp();
+} else if (sessionStorage.getItem("kckRole") === "viewer"){
+  sessionStorage.removeItem("kckAuthed");
+  sessionStorage.removeItem("kckRole");
+}
 gateForm.addEventListener("submit", e => {
   e.preventDefault();
   const email = document.getElementById("gateEmail").value.trim().toLowerCase();
