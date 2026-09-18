@@ -15,6 +15,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 
 import psycopg2
+from psycopg2.extras import execute_values
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -112,6 +113,9 @@ def replace_months(dataset, rows):
     for row in rows:
         by_month[_month_key(row["date"])].append(row)
 
+    # execute_values sends every row in ONE round trip per month (instead of
+    # one round trip per row) - the difference between an upload of a few
+    # thousand rows taking seconds vs. minutes over the network to Postgres.
     result = {}
     with _conn() as conn, conn.cursor() as cur:
         for month, new_rows in by_month.items():
@@ -119,10 +123,17 @@ def replace_months(dataset, rows):
             deduped = {}
             for row in new_rows:
                 deduped[_row_key(dataset, row)] = row
-            for key, row in deduped.items():
-                cur.execute(
-                    "INSERT INTO rows (dataset, month, row_key, data) VALUES (%s, %s, %s, %s);",
-                    (dataset, month, key, json.dumps(row)),
+            if deduped:
+                values = [(dataset, month, key, json.dumps(row)) for key, row in deduped.items()]
+                # page_size = the whole batch: one round trip total instead of
+                # execute_values' default of one round trip per 100 rows -
+                # network latency to Postgres, not row count, is what
+                # dominates upload time here.
+                execute_values(
+                    cur,
+                    "INSERT INTO rows (dataset, month, row_key, data) VALUES %s",
+                    values,
+                    page_size=len(values),
                 )
             result[month] = {"added": len(deduped), "updated": 0}
     return result
@@ -136,21 +147,25 @@ def upsert_rows(dataset, rows):
     result = {}
     with _conn() as conn, conn.cursor() as cur:
         for month, new_rows in by_month.items():
-            added = updated = 0
+            deduped = {}
             for row in new_rows:
-                key = _row_key(dataset, row)
-                cur.execute("SELECT 1 FROM rows WHERE dataset = %s AND row_key = %s;", (dataset, key))
-                exists = cur.fetchone() is not None
-                cur.execute(
-                    "INSERT INTO rows (dataset, month, row_key, data) VALUES (%s, %s, %s, %s) "
-                    "ON CONFLICT (dataset, row_key) DO UPDATE SET data = EXCLUDED.data, month = EXCLUDED.month;",
-                    (dataset, month, key, json.dumps(row)),
-                )
-                if exists:
-                    updated += 1
-                else:
-                    added += 1
-            result[month] = {"added": added, "updated": updated}
+                deduped[_row_key(dataset, row)] = row
+            values = [(dataset, month, key, json.dumps(row)) for key, row in deduped.items()]
+            # xmax = 0 on the returned row means this INSERT created it fresh;
+            # a nonzero xmax means ON CONFLICT UPDATE touched an existing row
+            # - lets us report added/updated without a separate SELECT per row.
+            # page_size = the whole batch, same reasoning as replace_months.
+            rows_out = execute_values(
+                cur,
+                "INSERT INTO rows (dataset, month, row_key, data) VALUES %s "
+                "ON CONFLICT (dataset, row_key) DO UPDATE SET data = EXCLUDED.data, month = EXCLUDED.month "
+                "RETURNING (xmax = 0) AS inserted;",
+                values,
+                page_size=len(values),
+                fetch=True,
+            )
+            added = sum(1 for (inserted,) in rows_out if inserted)
+            result[month] = {"added": added, "updated": len(rows_out) - added}
     return result
 
 
