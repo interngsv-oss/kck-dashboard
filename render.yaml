@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: kck-dashboard
+    name: kck-gsv-dashboard
     runtime: python
     rootDir: backend
     plan: free
