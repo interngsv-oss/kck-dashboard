@@ -2529,6 +2529,11 @@ function viewMonthsInDashboard(months){
   state.customFrom = from;
   state.customTo = to;
   datePreset.value = "custom";
+  // "Data Available" should describe whatever upload's data is now actually
+  // on screen, same as the period line above it - otherwise jumping to an
+  // older upload via History leaves the two disagreeing with each other.
+  document.getElementById("dataAvailable").textContent =
+    from.toDateString() === to.toDateString() ? fmtDateLong(from) : `${fmtDateLong(from)} to ${fmtDateLong(to)}`;
   closeInputModal();
   closeHistoryModal();
   renderAll();
