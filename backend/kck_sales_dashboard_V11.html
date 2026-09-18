@@ -870,7 +870,6 @@
       <button class="modal-close" id="inputModalClose" type="button" aria-label="Close">✕</button>
     </div>
     <div class="modal-body">
-      <p class="modal-hint">Select the "Posist Report" folder from the Google Drive export — either the unzipped folder itself, or its .zip file directly, no need to unzip it first. It should contain (or its .zip should contain) "Payment Report", "Bill Item Detailed Report" and "Discount and Voucher Report" subfolders. The server parses it and updates the live dashboard for everyone.</p>
       <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="Drop the Posist Report folder or its zip file here, or click to choose it">
         <div class="drop-zone-text">Drop the Posist Report folder (or its .zip) here</div>
         <div class="drop-zone-or">or</div>
@@ -2493,8 +2492,11 @@ uploadBtn.addEventListener("click", async () => {
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || `Server returned ${res.status}`);
     const fmt = (label, r) => `<div><b>${esc(label)}:</b> ${Object.entries(r).map(([m, c]) => `${m} replaced with ${num(c.added)} row${c.added === 1 ? "" : "s"}`).join(", ") || "no rows"}</div>`;
+    const missingNote = (body.missing || []).length
+      ? `<div class="gate-error" style="margin-top:8px;">Not found in this upload (marked as no data available): ${esc(body.missing.join(", "))}</div>`
+      : "";
     inputPreview.hidden = false;
-    inputPreview.innerHTML = fmt("Bills", body.bills) + fmt("Dish sales", body.sales) + fmt("Discounts", body.discounts);
+    inputPreview.innerHTML = fmt("Bills", body.bills) + fmt("Dish sales", body.sales) + fmt("Discounts", body.discounts) + missingNote;
     inputStatus.textContent = "Uploaded — refreshing the dashboard…";
     applyDataset(await loadDashboardData());
     inputStatus.textContent = "Done. The dashboard now reflects this upload.";
@@ -2562,11 +2564,12 @@ async function refreshUploadHistory(){
         <td class="wrap">${esc(rowsFor(e.bills))}</td>
         <td class="wrap">${esc(rowsFor(e.sales))}</td>
         <td class="wrap">${esc(rowsFor(e.discounts))}</td>
+        <td class="wrap soft">${esc((e.missing || []).join(", ") || "—")}</td>
         <td>${(e.months || []).length ? `<button class="action-btn ghost history-view-btn" type="button" data-idx="${i}">View</button>` : "—"}</td>
       </tr>`).join("");
     historyList.innerHTML = `
       <table class="data history-table">
-        <thead><tr>${th("Uploaded At")}${th("Month(s)")}${th("Files")}${th("Bills")}${th("Dish Sales")}${th("Discounts")}${th("")}</tr></thead>
+        <thead><tr>${th("Uploaded At")}${th("Month(s)")}${th("Files")}${th("Bills")}${th("Dish Sales")}${th("Discounts")}${th("Not Available")}${th("")}</tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>`;
     historyList.querySelectorAll(".history-view-btn").forEach(btn => {

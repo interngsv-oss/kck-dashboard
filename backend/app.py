@@ -201,7 +201,7 @@ async def upload_export(files: List[UploadFile] = File(...)):
 
         posist_root = _find_posist_root(extract_dir)
         try:
-            bills, sales, discounts = parsers.parse_posist_export(posist_root)
+            bills, sales, discounts, missing_sections = parsers.parse_posist_export(posist_root)
         except FileNotFoundError as e:
             raise HTTPException(400, str(e))
 
@@ -236,12 +236,14 @@ async def upload_export(files: List[UploadFile] = File(...)):
         "bills": bills_result,
         "sales": sales_result,
         "discounts": discounts_result,
+        "missing": missing_sections,
     })
 
     return {
         "bills": bills_result,
         "sales": sales_result,
         "discounts": discounts_result,
+        "missing": missing_sections,
     }
 
 

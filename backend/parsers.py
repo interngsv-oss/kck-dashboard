@@ -211,28 +211,55 @@ BRANCH_MAP = {
 
 
 def parse_posist_export(posist_root):
-    """Parse a whole Posist export folder -> (bills, sales, discounts) lists,
-    combined across both branches. Raises FileNotFoundError if a report/branch
-    file is missing."""
+    """Parse a whole Posist export folder -> (bills, sales, discounts, missing)
+    combined across both branches.
+
+    A missing report type or branch file (e.g. no "Discount and Voucher
+    Report" this month, or one branch didn't send its Bill Item file) is
+    tolerated: that section just comes back empty and its description is
+    added to `missing`, instead of failing the whole upload - the dashboard
+    then shows "no data" for whatever wasn't included rather than rejecting
+    bills/sales that WERE there. Only raises if there isn't a single bill
+    anywhere (Payment Report for both branches missing), since without any
+    bills there's no date range to anchor the upload to."""
     payment_dir = os.path.join(posist_root, "Payment Report")
     bill_item_dir = os.path.join(posist_root, "Bill Item Detailed Report")
     discount_dir = os.path.join(posist_root, "Discount and Voucher Report")
 
     all_bills, sales_data, discount_data = [], [], []
     bill_totals_by_branch = {}
+    missing = []
 
     for file_hint, branch_label in BRANCH_MAP.items():
-        fp = find_branch_file(payment_dir, file_hint)
+        try:
+            fp = find_branch_file(payment_dir, file_hint)
+        except FileNotFoundError:
+            missing.append(f"Payment Report ({branch_label})")
+            bill_totals_by_branch[branch_label] = {}
+            continue
         bills, bill_totals = parse_payment_report(fp, branch_label)
         all_bills.extend(bills)
         bill_totals_by_branch[branch_label] = bill_totals
 
+    if not all_bills:
+        raise FileNotFoundError(
+            "No 'Payment Report' found for either branch - can't tell which dates this upload covers."
+        )
+
     for file_hint, branch_label in BRANCH_MAP.items():
-        fp = find_branch_file(bill_item_dir, file_hint)
+        try:
+            fp = find_branch_file(bill_item_dir, file_hint)
+        except FileNotFoundError:
+            missing.append(f"Bill Item Detailed Report ({branch_label})")
+            continue
         sales_data.extend(parse_bill_item_report(fp, branch_label))
 
     for file_hint, branch_label in BRANCH_MAP.items():
-        fp = find_branch_file(discount_dir, file_hint)
+        try:
+            fp = find_branch_file(discount_dir, file_hint)
+        except FileNotFoundError:
+            missing.append(f"Discount and Voucher Report ({branch_label})")
+            continue
         discount_data.extend(parse_discount_report(fp, branch_label, bill_totals_by_branch[branch_label]))
 
-    return all_bills, sales_data, discount_data
+    return all_bills, sales_data, discount_data, missing
