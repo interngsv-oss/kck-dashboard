@@ -170,6 +170,21 @@ def delete_row(dataset, key_row):
     return False
 
 
+def clear_all():
+    """Wipe every uploaded row (all datasets, all months), the upload history
+    log, and reset meta.json back to its empty defaults. Irreversible -
+    callers must confirm with the user before calling this."""
+    for dataset in KEY_FIELDS:
+        for month in list_months(dataset):
+            os.remove(_month_file(dataset, month))
+    _write_json(os.path.join(DATA_DIR, "upload_history.json"), [])
+    write_meta({
+        "dataStart": None, "dataEnd": None, "lastRefreshed": None,
+        "reasons": ["Guest Cancellation", "Change Of Item", "Not Specified", "Other"],
+        "discountReasons": [], "serviceTypes": ["Dine-In", "Home Delivery", "Takeaway", "Banquets & Catering"],
+    })
+
+
 def recompute_meta_dates():
     """Refresh meta.json's dataStart/dataEnd from whatever bill months exist
     on disk right now. Call after every upload."""

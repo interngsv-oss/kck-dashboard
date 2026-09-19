@@ -132,7 +132,7 @@ def _find_posist_root(extract_dir, max_depth=4):
     (e.g. macOS's '__MACOSX') - search down a few levels for the first folder
     that actually contains 'Payment Report', ignoring junk folders."""
     def search(d, depth):
-        if os.path.isdir(os.path.join(d, "Payment Report")):
+        if os.path.isdir(parsers.find_dir_ci(d, "Payment Report")):
             return d
         if depth <= 0:
             return None
@@ -250,6 +250,17 @@ async def upload_export(files: List[UploadFile] = File(...)):
         "discounts": discounts_result,
         "missing": missing_sections,
     }
+
+
+@app.post("/api/clear-all")
+def clear_all_data():
+    """Wipes every uploaded row and the upload history log entirely. NOTE:
+    like the rest of this app's login gate, there's no real server-side
+    auth - this just isn't wired into the admin-only UI for a viewer
+    session. Must stay registered before POST /api/{dataset} below, same
+    reasoning as POST /api/upload."""
+    storage.clear_all()
+    return {"cleared": True}
 
 
 @app.post("/api/{dataset}")

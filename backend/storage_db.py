@@ -176,6 +176,16 @@ def delete_row(dataset, key_row):
         return cur.rowcount > 0
 
 
+def clear_all():
+    """Wipe every uploaded row (all datasets, all months), the upload history
+    log, and reset meta back to its empty defaults. Irreversible - callers
+    must confirm with the user before calling this."""
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM rows;")
+        cur.execute("DELETE FROM upload_history;")
+    write_meta(dict(DEFAULT_META))
+
+
 def recompute_meta_dates():
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT MIN(data->>'date'), MAX(data->>'date') FROM rows WHERE dataset = 'bills';")

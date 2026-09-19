@@ -368,6 +368,17 @@
      (modals) its near-white text is almost invisible, so re-tone it here. */
   .modal-box .action-btn.ghost{color:var(--ink);border-color:var(--rule);}
   .modal-box .action-btn.ghost:hover{border-color:var(--ink-mute);background:var(--rule-soft);}
+  .action-btn.danger{background:var(--brand-red);border-color:var(--brand-red);color:#fff;}
+  .action-btn.danger:hover{background:#7E2216;}
+  .history-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;}
+  .history-toolbar .modal-hint{margin:0;flex:1;}
+  .history-toolbar .action-btn{flex:none;white-space:nowrap;}
+  .clear-all-confirm{
+    margin:12px 0;padding:14px 16px;border-radius:6px;
+    background:var(--red-soft,#F6E4E0);border:1px solid var(--brand-red);
+  }
+  .clear-all-confirm p{margin:0 0 10px;font-size:13px;color:var(--ink);}
+  .clear-all-confirm .modal-actions{margin-top:0;}
 
   @media(max-width:1100px){
     /* company and data-available share the first row; title/period/outlet move to a centred second row */
@@ -898,7 +909,17 @@
       <button class="modal-close" id="historyModalClose" type="button" aria-label="Close">✕</button>
     </div>
     <div class="modal-body">
-      <p class="modal-hint">Every time data has been uploaded, newest first — which files were sent, which months they replaced, and how many rows landed in each dataset.</p>
+      <div class="history-toolbar">
+        <p class="modal-hint">Every time data has been uploaded, newest first — which files were sent, which months they replaced, and how many rows landed in each dataset.</p>
+        <button class="action-btn danger" id="clearAllDataBtn" type="button">Clear All Data</button>
+      </div>
+      <div id="clearAllConfirm" class="clear-all-confirm" hidden>
+        <p><b>This permanently deletes every uploaded bill, dish sale, discount, and this history log — for everyone.</b> This cannot be undone.</p>
+        <div class="modal-actions">
+          <button class="action-btn ghost" id="clearAllCancelBtn" type="button">Cancel</button>
+          <button class="action-btn danger" id="clearAllConfirmBtn" type="button">Yes, delete everything</button>
+        </div>
+      </div>
       <div id="historyList" class="table-scroll"></div>
     </div>
   </div>
@@ -2604,12 +2625,48 @@ async function refreshUploadHistory(){
 
 document.getElementById("openHistoryBtn").addEventListener("click", () => {
   historyModalOverlay.hidden = false;
+  clearAllConfirm.hidden = true;
   refreshUploadHistory();
 });
 document.getElementById("historyModalClose").addEventListener("click", closeHistoryModal);
 historyModalOverlay.addEventListener("click", e => { if (e.target === historyModalOverlay) closeHistoryModal(); });
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && !historyModalOverlay.hidden) closeHistoryModal();
+});
+
+/* ---- Clear All Data: wipes every uploaded row (bills/sales/discounts/
+   cancellations, all months) and the upload history log itself, via
+   POST /api/clear-all. Irreversible and destroys real production data, so
+   it's gated behind an inline two-step confirm (button reveals an "are you
+   sure" panel) rather than acting on the first click. ---- */
+const clearAllDataBtn = document.getElementById("clearAllDataBtn");
+const clearAllConfirm = document.getElementById("clearAllConfirm");
+const clearAllConfirmText = clearAllConfirm.querySelector("p").innerHTML;
+const clearAllCancelBtn = document.getElementById("clearAllCancelBtn");
+const clearAllConfirmBtn = document.getElementById("clearAllConfirmBtn");
+
+clearAllDataBtn.addEventListener("click", () => {
+  clearAllConfirm.querySelector("p").innerHTML = clearAllConfirmText;
+  clearAllConfirm.hidden = false;
+});
+clearAllCancelBtn.addEventListener("click", () => { clearAllConfirm.hidden = true; });
+clearAllConfirmBtn.addEventListener("click", async () => {
+  clearAllConfirmBtn.disabled = true;
+  clearAllConfirmBtn.textContent = "Deleting…";
+  try {
+    const res = await fetch("/api/clear-all", { method: "POST" });
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    clearAllConfirm.hidden = true;
+    closeHistoryModal();
+    applyDataset(await loadDashboardData());
+  } catch (err){
+    console.error("Clear all data failed", err);
+    clearAllConfirm.querySelector("p").innerHTML =
+      `<b>Failed to clear data:</b> ${esc(err.message)}. Nothing was deleted — try again.`;
+  } finally {
+    clearAllConfirmBtn.disabled = false;
+    clearAllConfirmBtn.textContent = "Yes, delete everything";
+  }
 });
 
 /* Share: builds a REAL PDF (html2canvas rasterizes the on-screen report, jsPDF

@@ -24,6 +24,30 @@ def find_branch_file(report_dir, branch_hint):
     raise FileNotFoundError(f"No file matching '{branch_hint}' in {report_dir}")
 
 
+def find_dir_ci(parent, name):
+    """Case-insensitive lookup of a subfolder named `name` inside `parent`.
+
+    Real-world Posist/Google-Drive exports aren't always consistent about
+    capitalization (e.g. a folder actually named "Discount and voucher
+    Report" instead of "Discount and Voucher Report"), and unlike Windows,
+    directory lookups are case-SENSITIVE on the Linux servers this runs on
+    in production - a folder name that looks fine to a human eye can
+    silently fail to be found, making real uploaded data show up as
+    "not available" even though it's genuinely in the file. Falls back to
+    the exact-case path if no case-insensitive match exists either (which
+    then correctly reports as actually missing)."""
+    exact = os.path.join(parent, name)
+    if os.path.isdir(exact):
+        return exact
+    if not os.path.isdir(parent):
+        return exact
+    target = name.lower()
+    for entry in os.listdir(parent):
+        if entry.lower() == target and os.path.isdir(os.path.join(parent, entry)):
+            return os.path.join(parent, entry)
+    return exact
+
+
 def _to_iso_date(value):
     """Payment/Bill-Item date-times come as 'DD-MM-YYYY hh:mm:ss pm' or
     'DD-Mon-YYYY hh:mm:ss pm' strings. Return 'YYYY-MM-DD'."""
@@ -222,9 +246,9 @@ def parse_posist_export(posist_root):
     bills/sales that WERE there. Only raises if there isn't a single bill
     anywhere (Payment Report for both branches missing), since without any
     bills there's no date range to anchor the upload to."""
-    payment_dir = os.path.join(posist_root, "Payment Report")
-    bill_item_dir = os.path.join(posist_root, "Bill Item Detailed Report")
-    discount_dir = os.path.join(posist_root, "Discount and Voucher Report")
+    payment_dir = find_dir_ci(posist_root, "Payment Report")
+    bill_item_dir = find_dir_ci(posist_root, "Bill Item Detailed Report")
+    discount_dir = find_dir_ci(posist_root, "Discount and Voucher Report")
 
     all_bills, sales_data, discount_data = [], [], []
     bill_totals_by_branch = {}
