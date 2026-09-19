@@ -20,7 +20,7 @@ import os
 import shutil
 import tempfile
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -222,7 +222,13 @@ async def upload_export(files: List[UploadFile] = File(...)):
     meta = storage.read_meta()
     if discount_reasons:
         meta["discountReasons"] = sorted(set(meta.get("discountReasons", [])) | set(discount_reasons))
-    meta["lastRefreshed"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    # Explicit UTC + "Z" suffix - Render's server clock is UTC, and without a
+    # timezone marker the browser's `new Date(...)` would wrongly treat this
+    # as already being in the VIEWER's local time (per the ES spec's handling
+    # of timezone-less datetime strings), showing a time up to many hours off
+    # for anyone not in UTC. With the "Z", the browser correctly converts it
+    # to whatever timezone the viewer is actually in.
+    meta["lastRefreshed"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # "Data Available" tracks exactly what THIS upload's own rows span (e.g. if
     # the report only has rows for 1-25 June, this shows "1 Jun to 25 Jun") -
     # not the full history still sitting in storage for other months, so it
