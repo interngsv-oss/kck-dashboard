@@ -725,6 +725,8 @@
   }
   .gate-input:focus{border-color:var(--brand-gold);outline:none;}
   .gate-error{color:#E88A78;font-size:13px;}
+  .gate-status{color:var(--on-dark-soft);font-size:13px;}
+  #gateSubmitBtn:disabled{opacity:.65;cursor:default;}
   .gate-card .action-btn{font-size:14px;padding:9px 22px;margin-top:6px;width:100%;justify-content:center;}
   .gate-footer{margin-top:28px;font-size:12.5px;color:var(--on-dark-soft);display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
   .gate-footer a{color:var(--brand-taupe);}
@@ -792,7 +794,8 @@
         <label class="gate-label" for="gatePassword">Password</label>
         <input class="gate-input" type="password" id="gatePassword" autocomplete="current-password" required>
         <div class="gate-error" id="gateError" hidden>Incorrect email or password.</div>
-        <button class="action-btn hd" type="submit">Log In</button>
+        <div class="gate-status" id="gateStatus" hidden>Connecting…</div>
+        <button class="action-btn hd" type="submit" id="gateSubmitBtn">Log In</button>
       </form>
       <div class="gate-footer">
         Powered By <a href="https://gsvassociates.com/" target="_blank" rel="noopener">GSV Associates LLP</a>
@@ -2938,7 +2941,16 @@ const authGate = document.getElementById("authGate");
 const appRoot = document.getElementById("appRoot");
 const gateForm = document.getElementById("gateForm");
 const gateError = document.getElementById("gateError");
+const gateStatus = document.getElementById("gateStatus");
+const gateSubmitBtn = document.getElementById("gateSubmitBtn");
 let appStarted = false;
+
+function setGateLoading(loading){
+  gateSubmitBtn.disabled = loading;
+  gateSubmitBtn.textContent = loading ? "Logging in…" : "Log In";
+  gateStatus.hidden = !loading;
+  if (loading) gateStatus.textContent = "Connecting… this can take up to a minute if the server was idle.";
+}
 
 function currentRole(){ return sessionStorage.getItem("kckRole") || "admin"; }
 
@@ -2951,16 +2963,19 @@ function applyRoleUI(role){
 async function startApp(){
   if (appStarted) return;
   appStarted = true;
+  setGateLoading(true);
   let raw;
   try {
     raw = await loadDashboardData();
   } catch (err) {
     console.error("Failed to load dashboard data from the API", err);
     appStarted = false;
+    setGateLoading(false);
     gateError.textContent = "Could not load dashboard data - is the backend server running?";
     gateError.hidden = false;
     return;
   }
+  setGateLoading(false);
   applyDashboardData(raw);
   ACTIVE_RAW_DATA = raw;
   authGate.style.display = "none";
