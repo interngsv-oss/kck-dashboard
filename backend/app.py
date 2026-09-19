@@ -70,7 +70,7 @@ def _require_key_fields(dataset: str, row: Dict[str, Any]):
         raise HTTPException(400, f"Missing required field(s) for '{dataset}': {missing}")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def serve_dashboard():
     # No-cache so every deploy is visible immediately - without this, browsers
     # can keep showing a stale cached copy of the page after we ship a fix,
@@ -78,8 +78,10 @@ def serve_dashboard():
     return FileResponse(DASHBOARD_HTML_PATH, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
-@app.get("/api/meta")
+@app.api_route("/api/meta", methods=["GET", "HEAD"])
 def get_meta():
+    # HEAD too - uptime-monitor pings (UptimeRobot etc.) default to HEAD
+    # requests, which a GET-only route rejects with 405.
     return storage.read_meta()
 
 
