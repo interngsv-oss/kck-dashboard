@@ -1133,6 +1133,8 @@
 let LAST_REFRESHED = new Date("2026-09-08T19:37:18");
 let TODAY = new Date("2026-07-31T00:00:00");
 let DAYS_OF_DATA = 30;
+let DATA_MIN_DATE = null; // true earliest bill date across ALL stored months - see applyDashboardData()
+let DATA_MAX_DATE = null; // true latest bill date across ALL stored months
 
 /* chart colours follow the CSS brand variables */
 const css = getComputedStyle(document.documentElement);
@@ -1234,6 +1236,20 @@ function applyDashboardData(raw){
   DAYS_OF_DATA = raw.meta.dataStart
     ? Math.round((TODAY - new Date(raw.meta.dataStart+"T00:00:00")) / 86400000)
     : 30;
+
+  /* The custom-date-range calendar needs to navigate across EVERY month that
+     actually has data (e.g. June and July both stored), not just the most
+     recent upload's range - meta.dataStart/dataEnd only describe the latest
+     upload (by design, for the "Data Available" label), so derive the
+     calendar's true min/max directly from the bills actually loaded. */
+  if (ALL_BILLS.length){
+    const times = ALL_BILLS.map(r => r.date.getTime());
+    DATA_MIN_DATE = new Date(Math.min(...times));
+    DATA_MAX_DATE = new Date(Math.max(...times));
+  } else {
+    DATA_MIN_DATE = dayOffset(DAYS_OF_DATA);
+    DATA_MAX_DATE = TODAY;
+  }
 }
 
 /* Fetches the full dataset from the backend API (see backend/app.py) and
@@ -1997,7 +2013,7 @@ function openPeriodPop(){
     <button class="apply-btn" id="applyCustom" disabled>Apply</button>`;
   document.body.appendChild(pop);
 
-  const minDate = dayOffset(DAYS_OF_DATA), maxDate = TODAY;
+  const minDate = DATA_MIN_DATE || dayOffset(DAYS_OF_DATA), maxDate = DATA_MAX_DATE || TODAY;
   const minKey = isoLocal(minDate), maxKey = isoLocal(maxDate);
   const holidayMap = holidaysForBranch(state.branch);
   let calFrom = state.customFrom ? new Date(state.customFrom) : null;
