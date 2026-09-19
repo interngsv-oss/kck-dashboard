@@ -274,6 +274,19 @@
   .cal-day.range-start.holiday::after,.cal-day.range-end.holiday::after{background:var(--brand-dark);}
   .cal-legend{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--on-dark-soft);}
   .cal-legend .dot{width:5px;height:5px;border-radius:50%;background:var(--brand-orange);display:inline-block;}
+  .view-holidays-btn{
+    background:none;border:none;color:var(--brand-taupe);
+    font-size:11.5px;text-decoration:underline;cursor:pointer;padding:0;
+    font-family:var(--body-font);white-space:nowrap;
+  }
+  .view-holidays-btn:hover{color:var(--ink);}
+  .holiday-pop{max-height:min(360px, 70vh);overflow-y:auto;width:290px;}
+  .holiday-pop-title{font-weight:700;color:var(--on-dark);font-size:13px;margin-bottom:8px;}
+  .holiday-pop-row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;color:var(--on-dark-soft);padding:5px 0;border-bottom:1px solid var(--brand-line);}
+  .holiday-pop-row:last-child{border-bottom:none;}
+  .holiday-pop-date{color:var(--on-dark);font-weight:700;flex:none;white-space:nowrap;}
+  .holiday-pop-name{text-align:right;}
+  .holiday-pop-empty{font-size:12.5px;color:var(--on-dark-soft);text-align:center;padding:10px 0;}
   .cal-range-label{font-size:12px;color:var(--on-dark);text-align:center;min-height:16px;}
   .apply-btn{
     background:var(--brand-gold);color:var(--brand-dark);border:none;
@@ -2008,6 +2021,57 @@ function holidaysForBranch(branch){
   if (branch === "Bengaluru" || branch === "All") addAll(HOLIDAYS_2026.Bengaluru);
   return map;
 }
+
+/* ---- "View Holidays" popover: lists the exact date + name of every
+   government holiday behind "Public Holidays Only" (sourced from
+   HOLIDAYS_2026 above, official Tamil Nadu / Karnataka 2026 notifications),
+   for whichever outlet is currently selected. A small link is injected next
+   to every "Day Type" control (one per page) rather than duplicating it six
+   times in the markup. ---- */
+let holidayPop = null;
+function closeHolidayPop(){
+  if (holidayPop){ holidayPop.remove(); holidayPop = null; }
+}
+function openHolidayPop(anchorEl){
+  closeHolidayPop();
+  closePeriodPop(false);
+  const map = holidaysForBranch(state.branch);
+  const entries = [...map.entries()].sort(([a], [b]) => a < b ? -1 : 1);
+  const pop = document.createElement("div");
+  pop.className = "period-pop holiday-pop";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", "Public holidays");
+  pop.innerHTML = `
+    <div class="holiday-pop-title">Public Holidays 2026 — ${esc(outletLabel())}</div>
+    ${entries.length ? entries.map(([date, names]) => `
+      <div class="holiday-pop-row">
+        <span class="holiday-pop-date">${esc(fmtDateLong(new Date(date + "T00:00:00")))}</span>
+        <span class="holiday-pop-name">${esc(names.join(", "))}</span>
+      </div>`).join("") : `<div class="holiday-pop-empty">No holidays listed for this outlet.</div>`}`;
+  document.body.appendChild(pop);
+  const rect = anchorEl.getBoundingClientRect(), pw = pop.offsetWidth;
+  let left = Math.min(rect.left, window.innerWidth - pw - 8);
+  left = Math.max(8, left);
+  const top = Math.min(rect.bottom + 6, window.innerHeight - pop.offsetHeight - 8);
+  pop.style.left = left + "px";
+  pop.style.top = Math.max(8, top) + "px";
+  holidayPop = pop;
+}
+document.addEventListener("mousedown", e => {
+  if (holidayPop && !holidayPop.contains(e.target) && !e.target.closest(".view-holidays-btn")) closeHolidayPop();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && holidayPop) closeHolidayPop(); });
+window.addEventListener("resize", closeHolidayPop);
+
+document.querySelectorAll(".day-type-select").forEach(sel => {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "view-holidays-btn";
+  btn.textContent = "View Holidays";
+  btn.title = "See the exact public holiday dates and names behind this filter";
+  btn.addEventListener("click", e => { e.stopPropagation(); openHolidayPop(btn); });
+  sel.insertAdjacentElement("afterend", btn);
+});
 
 let periodPop = null;
 function closePeriodPop(revertSelect){
