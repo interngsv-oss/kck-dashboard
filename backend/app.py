@@ -206,7 +206,7 @@ async def upload_export(files: List[UploadFile] = File(...)):
 
         posist_root = _find_posist_root(extract_dir)
         try:
-            bills, sales, discounts, missing_sections = parsers.parse_posist_export(posist_root)
+            bills, sales, discounts, cancellations, missing_sections = parsers.parse_posist_export(posist_root)
         except FileNotFoundError as e:
             raise HTTPException(400, str(e))
 
@@ -217,6 +217,7 @@ async def upload_export(files: List[UploadFile] = File(...)):
     bills_result = storage.replace_months("bills", bills)
     sales_result = storage.replace_months("sales", sales)
     discounts_result = storage.replace_months("discounts", discounts)
+    cancellations_result = storage.replace_months("cancellations", cancellations)
 
     discount_reasons = sorted({d["reason"] for d in discounts}) if discounts else None
     meta = storage.read_meta()
@@ -239,7 +240,9 @@ async def upload_export(files: List[UploadFile] = File(...)):
         meta["dataEnd"] = max(upload_dates)
     storage.write_meta(meta)
 
-    months_touched = sorted(set(bills_result) | set(sales_result) | set(discounts_result))
+    months_touched = sorted(
+        set(bills_result) | set(sales_result) | set(discounts_result) | set(cancellations_result)
+    )
     storage.append_upload_history({
         "timestamp": meta["lastRefreshed"],
         "files": [f.filename for f in files if f.filename],
@@ -247,6 +250,7 @@ async def upload_export(files: List[UploadFile] = File(...)):
         "bills": bills_result,
         "sales": sales_result,
         "discounts": discounts_result,
+        "cancellations": cancellations_result,
         "missing": missing_sections,
     })
 
@@ -254,6 +258,7 @@ async def upload_export(files: List[UploadFile] = File(...)):
         "bills": bills_result,
         "sales": sales_result,
         "discounts": discounts_result,
+        "cancellations": cancellations_result,
         "missing": missing_sections,
     }
 

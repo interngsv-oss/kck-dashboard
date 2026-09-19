@@ -2751,12 +2751,13 @@ async function refreshUploadHistory(){
         <td class="wrap">${esc(rowsFor(e.bills))}</td>
         <td class="wrap">${esc(rowsFor(e.sales))}</td>
         <td class="wrap">${esc(rowsFor(e.discounts))}</td>
+        <td class="wrap">${esc(rowsFor(e.cancellations))}</td>
         <td class="wrap soft">${esc((e.missing || []).join(", ") || "—")}</td>
         <td>${(e.months || []).length ? `<button class="action-btn ghost history-view-btn" type="button" data-idx="${i}">View</button>` : "—"}</td>
       </tr>`).join("");
     historyList.innerHTML = `
       <table class="data history-table">
-        <thead><tr>${th("Uploaded At")}${th("Month(s)")}${th("Files")}${th("Bills")}${th("Dish Sales")}${th("Discounts")}${th("Not Available")}${th("")}</tr></thead>
+        <thead><tr>${th("Uploaded At")}${th("Month(s)")}${th("Files")}${th("Bills")}${th("Dish Sales")}${th("Discounts")}${th("Cancelled KOTs")}${th("Not Available")}${th("")}</tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>`;
     historyList.querySelectorAll(".history-view-btn").forEach(btn => {

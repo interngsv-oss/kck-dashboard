@@ -8,6 +8,7 @@ pipeline. If Posist ever changes a report's column layout, fix it here.
 """
 
 import os
+import re
 import glob
 from datetime import datetime, date
 from collections import defaultdict
@@ -228,6 +229,116 @@ def parse_discount_report(fp, branch_label, bill_totals):
     return discounts
 
 
+_KOT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _classify_cancel_reason(comment):
+    """Map a cancelled item's own free-text 'Comment' cell to one of the
+    dashboard's fixed reason buckets (storage.DEFAULT reasons list)."""
+    c = (comment or "").strip()
+    if c in ("", "-"):
+        return "Not Specified"
+    cl = c.lower()
+    if cl == "guest cancellation":
+        return "Guest Cancellation"
+    if cl == "change of item":
+        return "Change Of Item"
+    return "Other"
+
+
+def parse_kot_tracking_report(fp, branch_label):
+    """-> cancellation rows, one per cancelled ("Deleted") item line, from a
+    Posist "KOT Tracking Report" export.
+
+    The sheet is a nested, stateful layout, not a flat table: a date-marker
+    row, then repeating blocks of [instance label -> KOT header row -> item
+    sub-header -> item rows -> "KOT Total" row]. The KOT header row's own
+    column layout is NOT stable - e.g. the Bangalore file has an extra "Edit
+    Bill Comment" column the Chennai file doesn't, shifting every column
+    after it - so rows are classified by their VALUE SHAPE instead of a
+    fixed column index: the bill number cell (index 2) is always text on a
+    KOT header row and always a number (the item's rate) on an item row,
+    which reliably tells the two apart regardless of branch-specific column
+    drift. An item's own "Status" column ("Billed" vs "Deleted") is the
+    per-item cancellation signal - it reads "Deleted" both for an item voided
+    individually inside an otherwise-billed KOT, and for every item inside a
+    fully "KOT Voided"/"Bill Voided" KOT, so this one check catches both
+    cases. The item's own "Comment" column carries the cancellation reason
+    ("Guest Cancellation", "Change of item", or freeform text) - the KOT
+    Tracking Report's real column layout (verified directly against Sept
+    2026 production Posist exports) does carry item-level detail, unlike an
+    earlier, now-known-incorrect assumption that it only had bill-level
+    status.
+
+    The same dish can be cancelled more than once within one bill (e.g. two
+    separate KOTs for the same table both had a "Vattayappam" voided), which
+    would collide under storage.KEY_FIELDS["cancellations"]'s
+    (branch, bill, date, item) key and silently overwrite one occurrence with
+    another - so, like parse_bill_item_report's aggregation, occurrences that
+    share that key are summed here into a single row instead of losing all
+    but the last one.
+    """
+    wb = openpyxl.load_workbook(fp, data_only=True, read_only=True)
+    ws = wb["Sheet1"]
+    agg = {}
+    cur_date = None
+    cur_bill = None
+    for row in ws.iter_rows(min_row=9, values_only=True):
+        c0 = row[0]
+        if c0 is None:
+            continue
+        s0 = str(c0).strip()
+        if row[1] is None and _KOT_DATE_RE.match(s0):
+            cur_date = s0
+            continue
+        if s0.startswith("Instance") or s0 in ("Item Name", "KOT Total"):
+            continue
+        if isinstance(row[2], str):
+            # KOT header row - only the bill number (needed for the output
+            # row) is read; KOT-level status/comment are ignored since the
+            # item-level fields below are the reliable signal.
+            cur_bill = row[2].strip()
+            continue
+        if not (isinstance(row[1], (int, float)) and isinstance(row[2], (int, float))):
+            continue  # unrecognised row shape - skip rather than guess
+        status = str(row[4]).strip() if row[4] is not None else ""
+        if status != "Deleted" or cur_date is None or cur_bill is None:
+            continue
+        item = _clean_name(c0)
+        if not item:
+            continue
+        qty = row[1]
+        value = float(row[3]) if isinstance(row[3], (int, float)) else 0.0
+        reason = _classify_cancel_reason(row[5] if len(row) > 5 else None)
+        key = (cur_date, cur_bill, item)
+        if key in agg:
+            entry = agg[key]
+            entry["qty"] += qty
+            entry["value"] += value
+            # "Not Specified" is the least informative reason - prefer
+            # whichever occurrence actually named one.
+            if entry["reason"] == "Not Specified" and reason != "Not Specified":
+                entry["reason"] = reason
+        else:
+            agg[key] = {"qty": qty, "value": value, "reason": reason}
+    wb.close()
+
+    cancellations = []
+    for (row_date, bill, item), v in agg.items():
+        qty = v["qty"]
+        cancellations.append({
+            "date": row_date,
+            "branch": branch_label,
+            "bill": bill,
+            "item": item,
+            "qty": qty if qty % 1 else int(qty),
+            "rate": round(v["value"] / qty, 2) if qty else 0.0,
+            "value": round(v["value"], 2),
+            "reason": v["reason"],
+        })
+    return cancellations
+
+
 BRANCH_MAP = {
     "Bangalore": "Bengaluru",
     "Chennai": "Chennai",
@@ -235,8 +346,8 @@ BRANCH_MAP = {
 
 
 def parse_posist_export(posist_root):
-    """Parse a whole Posist export folder -> (bills, sales, discounts, missing)
-    combined across both branches.
+    """Parse a whole Posist export folder -> (bills, sales, discounts,
+    cancellations, missing) combined across both branches.
 
     A missing report type or branch file (e.g. no "Discount and Voucher
     Report" this month, or one branch didn't send its Bill Item file) is
@@ -249,8 +360,9 @@ def parse_posist_export(posist_root):
     payment_dir = find_dir_ci(posist_root, "Payment Report")
     bill_item_dir = find_dir_ci(posist_root, "Bill Item Detailed Report")
     discount_dir = find_dir_ci(posist_root, "Discount and Voucher Report")
+    kot_dir = find_dir_ci(posist_root, "KOT Tracking Report")
 
-    all_bills, sales_data, discount_data = [], [], []
+    all_bills, sales_data, discount_data, cancellation_data = [], [], [], []
     bill_totals_by_branch = {}
     missing = []
 
@@ -286,4 +398,12 @@ def parse_posist_export(posist_root):
             continue
         discount_data.extend(parse_discount_report(fp, branch_label, bill_totals_by_branch[branch_label]))
 
-    return all_bills, sales_data, discount_data, missing
+    for file_hint, branch_label in BRANCH_MAP.items():
+        try:
+            fp = find_branch_file(kot_dir, file_hint)
+        except FileNotFoundError:
+            missing.append(f"KOT Tracking Report ({branch_label})")
+            continue
+        cancellation_data.extend(parse_kot_tracking_report(fp, branch_label))
+
+    return all_bills, sales_data, discount_data, cancellation_data, missing
